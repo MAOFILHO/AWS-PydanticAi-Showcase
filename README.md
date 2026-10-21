@@ -177,13 +177,12 @@ evals/                               # pydantic_evals: structural suite (researc
 terraform/                           # AWS ECS Fargate deploy target
 ```
 
-This project's GitHub Actions workflows live outside this folder, at the repo root's
-`.github/workflows/` — see [Infrastructure (Terraform)](#infrastructure-terraform) below:
+GitHub Actions workflows live in `.github/workflows/` — see [Infrastructure (Terraform)](#infrastructure-terraform) below:
 
 ```
-../.github/workflows/
-  aws-pydanticai-showcase-ci.yml      # lint + typecheck + test on every push touching this folder
-  aws-pydanticai-showcase-deploy.yml  # workflow_dispatch: build, push to ECR, roll the ECS service
+.github/workflows/
+  ci.yml      # lint + typecheck + test on every push
+  deploy.yml  # workflow_dispatch: build, push to ECR, roll the ECS service
 ```
 
 
@@ -211,7 +210,7 @@ the sum of everything above it — real evidence of where the latency goes, not 
 | **Package management** | `uv` |
 | **Container** | Docker, ARM64/Graviton base image |
 | **Infrastructure** | Terraform — ECS Fargate, ALB, ECR, Secrets Manager, IAM, default VPC (no NAT Gateway) |
-| **CI/CD** | GitHub Actions (repo-root `.github/workflows/`) — CI on every push touching this folder (offline, no API key), Deploy manual `workflow_dispatch` |
+| **CI/CD** | GitHub Actions (`.github/workflows/`) — CI on every push (offline, no API key), Deploy manual `workflow_dispatch` |
 
 See [Infrastructure (Terraform)](#infrastructure-terraform) below for what each AWS service does and
 how to provision/tear down the stack.
@@ -327,17 +326,14 @@ terraform output alb_dns_name
 terraform output
 ```
 
-After the first `apply`, set these as GitHub repo variables/secrets (prefixed `SHOWCASE_` since this
-repo hosts multiple projects' deploy workflows) so `aws-pydanticai-showcase-deploy.yml` can find the
+After the first `apply`, set these as GitHub repo variables/secrets (they keep the `SHOWCASE_` prefix from the
+monorepo this project was extracted from) so `deploy.yml` can find the
 stack: `SHOWCASE_AWS_REGION`, `SHOWCASE_ECR_REPOSITORY`, `SHOWCASE_ECS_CLUSTER`, `SHOWCASE_ECS_SERVICE`
 (all from `terraform output`), and `SHOWCASE_AWS_DEPLOY_ROLE_ARN` (from
-`terraform output github_deploy_role_arn`). Then trigger the `AWS-PydanticAi-Showcase Deploy` workflow
+`terraform output github_deploy_role_arn`). Then trigger the `Deploy` workflow
 manually from the Actions tab — it never runs on push.
 
-Both workflows live at the **repo root's** `.github/workflows/` (not inside this project folder) —
-GitHub Actions only discovers workflow files there, which matters in a monorepo like this one. Each
-is scoped to this project with a `paths: ["AWS-PydanticAi-Showcase/**"]` trigger filter and a
-`working-directory` default, the same pattern the repo's other projects use.
+Set `github_repository` in Terraform to `MAOFILHO/AWS-PydanticAi-Showcase` so the OIDC trust policy matches this repo.
 
 ### Pausing vs. tearing down
 
@@ -363,11 +359,11 @@ Continuous Integration (CI) and Continuous Deployment (CD) are deliberately sepa
 > **Architectural Note on "CD":** Rather than textbook Continuous Deployment (auto-releasing every commit) or strict Continuous Delivery (building image artifacts continuously), this project implements **on-demand deployment automation**. Deployments require an explicit human trigger (`workflow_dispatch`), ensuring real AWS resources (Fargate, ECR) are provisioned only when needed—eliminating standing cloud charges.
 
 
-### CI Workflow — `aws-pydanticai-showcase-ci.yml`
+### CI Workflow — `ci.yml`
 
 A green CI run signals that code is structurally and logically sound for deployment, without touching live cloud resources.
 
-* **Trigger:** Pushes or Pull Requests to `main` touching `AWS-PydanticAi-Showcase/**`, or manual `workflow_dispatch`.
+* **Trigger:** Pushes or Pull Requests to `main`, or manual `workflow_dispatch`.
 * **AWS Impact:** **None** (100% offline; uses dummy `OPENAI_API_KEY` and test stubs).
 * **Runtime:** ~35–40s on `ubuntu-latest`.
 
@@ -383,7 +379,7 @@ A green CI run signals that code is structurally and logically sound for deploym
 
 
 
-### Deploy Workflow — `aws-pydanticai-showcase-deploy.yml`
+### Deploy Workflow — `deploy.yml`
 
 Builds the production container image, pushes it to ECR, and executes a zero-downtime rolling update on AWS ECS Fargate.
 
@@ -647,7 +643,7 @@ flowchart LR
 | Local UI-stub overrides silently reverted mid-session | Bare `agent.override(model=...).__enter__()` calls in a loop let the temporary context manager get garbage-collected once the loop's tuple went out of scope — CPython's generator cleanup runs the context manager's `finally` block (undoing the override) on GC. Fixed by holding every override on a `contextlib.ExitStack` kept alive for the process |
 | `TestModel` needed to satisfy a discriminated-union schema offline | `TestModel` deterministically returns the *first* candidate in a sequence `output_type`, which is honest but means an eval evaluator that checks label-correctness can't score 1.0 offline by design — documented in `evals/triage.py`, and the offline test asserts the dataset *runs*, not that the score is perfect |
 | No free, keyless flight/hotel search API exists | Simulated inventory, but honestly labelled everywhere it's surfaced (tool docstring, API response, and the UI) rather than passed off as real |
-| The GitHub Actions deploy workflow lived where GitHub never looked | This repo is a monorepo; GitHub Actions only discovers workflow files at the repo root's `.github/workflows/`, not inside a project's own folder — `ci.yml`/`deploy.yml` had never actually run. Moved both to the root with a `paths:` trigger filter and a `working-directory` default, matching this repo's other projects |
+| The GitHub Actions deploy workflow lived where GitHub never looked | While this project lived in a monorepo, GitHub only discovered workflow files at the repo root's `.github/workflows/`, so `ci.yml`/`deploy.yml` inside the project folder had never actually run. Fixed by moving them to the root with path filters; after extraction into its own repo they live in `.github/workflows/` directly |
 | The deploy workflow crashed every task with `exec format error` | ECS runs on ARM64/Graviton for the cheaper Fargate pricing, but `ubuntu-latest` GitHub runners are x86_64 — a plain `docker build` there silently produces an amd64 image that can't execute on the task. `docker/setup-qemu-action` + `buildx build --platform linux/arm64` cross-builds the correct architecture; the already-running task kept serving traffic throughout, since ECS won't route to a task that fails to start |
 | The sign-in screen stayed visible after a successful login | `.signin`/`.shell` each set their own `display`, which beats the browser's default `[hidden] { display: none }` rule in the cascade — the session/DOM state was correct the whole time, but nothing visually reflected it. Fixed with an explicit `[hidden] { display: none !important; }` rule |
 | A redeploy could silently keep serving old JS/CSS | `StaticFiles` sends no `Cache-Control` of its own, so browsers apply heuristic caching to `/static/*`. Given `Cache-Control: no-store` on those responses too, matching the shell HTML, which already had it for the same reason |
